@@ -1,0 +1,29 @@
+steps:
+
+- name: 'gcr.io/cloud-builders/docker'
+  args: [
+    'build', 
+    '-t', 'gcr.io/theta-sunlight-383314/scraping:latest',
+    '-f','Dockerfile',
+    '.'
+  ]
+
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', 'gcr.io/theta-sunlight-383314/scraping:latest']
+  
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args: [
+    'run', 
+    'deploy', 
+    'scraping',
+    '--image', 'gcr.io/theta-sunlight-383314/scraping:latest',
+    '--region', 'us-central1',
+    '--min-instances', '1',
+    '--max-instances', '10',
+    '--platform', 'managed', 
+    '--port', '80',
+    '--timeout', '300',
+    '--no-cpu-throttling',
+    '--allow-unauthenticated'
+  ]

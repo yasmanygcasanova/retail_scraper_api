@@ -1,0 +1,8 @@
+# Ignorar ambiente virtual
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignorar arquivos de configuração locais
+config.json
