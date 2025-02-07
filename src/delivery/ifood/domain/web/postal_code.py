@@ -1,8 +1,9 @@
 """ Postal Code """
 import brazilcep
+import httpx
 from fastapi import HTTPException, status
-from geopy.geocoders import Nominatim
 from loguru import logger as log
+from typing import Dict, Optional
 
 from core.util.model_validator import validate_and_parse_model
 from core.util.strings import clean_html, format_zip_code
@@ -13,90 +14,91 @@ from src.delivery.ifood.models.web.postal_code import PostalCodeModel
 
 class PostalCode:
     """ Class Postal Code """
+    NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+    DEFAULT_TIMEOUT = 10.0
+    
     @staticmethod
-    async def request(
-        zip_code: str
-    ) -> dict:
+    async def _get_coordinates(client: httpx.AsyncClient, zip_code: str) -> tuple[str, str]:
+        """
+        Função auxiliar para obter coordenadas do Nominatim
+        :param client: Cliente HTTP
+        :param zip_code: CEP
+        :return: Tupla com (latitude, longitude)
+        """
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (compatible; MyApp/1.0)'
+            }
+            response = await client.get(
+                PostalCode.NOMINATIM_URL,
+                params={
+                    "format": "json",
+                    "q": f"{zip_code},Brazil"
+                },
+                headers=headers,
+                timeout=PostalCode.DEFAULT_TIMEOUT
+            )
+            response.raise_for_status()
+            nominatim_data = response.json()
+
+            if nominatim_data and len(nominatim_data) > 0:
+                return nominatim_data[0]['lat'], nominatim_data[0]['lon']
+            
+        except (httpx.RequestError, KeyError) as e:
+            log.error(f"Erro ao obter coordenadas: {str(e)}")
+        
+        return 'NA', 'NA'
+
+    @staticmethod
+    async def request(zip_code: str) -> Dict[str, Optional[dict]]:
         """
         Function Request
-        :param zip_code:
-        :return: dict
+        :param zip_code: CEP a ser consultado
+        :return: Dicionário com dados do endereço
         """
-        address = brazilcep.get_address_from_cep(format_zip_code(zip_code))
+        formatted_zip = format_zip_code(zip_code)
+        address = brazilcep.get_address_from_cep(formatted_zip)
+
         if not address:
-            data = {}
-        else:
-            data = {'address': address}
-        return data
+            return {}
+
+        async with httpx.AsyncClient(verify=False) as client:
+            latitude, longitude = await PostalCode._get_coordinates(client, formatted_zip)
+            address['latitude'] = latitude
+            address['longitude'] = longitude
+
+        return {'address': address}
 
     @staticmethod
-    async def get_data(
-        zip_code: str,
-        address: dict
-    ):
+    async def get_data(zip_code: str, address: dict):
         """
         Function Get Data
-        :param zip_code:
-        :param address:
-        :return:
+        :param zip_code: CEP
+        :param address: Dicionário com dados do endereço
+        :return: Dados formatados do endereço
         """
-        geolocator = Nominatim(user_agent="geolocation")
-
-        # Address Info
-        street = 'NA' if not address.get('street') \
-            else address.get('street')
-        neighborhood = 'NA' if not address.get('district') \
-            else address.get('district')
-        complement = 'NA' if not address.get('complement') \
-            else address.get('complement')
-        city = 'NA' if not address.get('city') \
-            else address.get('city')
-        region = 'NA' if not address.get('uf') \
-            else address.get('uf')
-
-        # Geolocator Info
-        if street != 'NA' and neighborhood != 'NA' and city != 'NA':
-            street = f"{street[0]}.{street[3:]}"
-            location = geolocator.geocode(
-                f"{street}, "
-                f"{neighborhood}-{city}, "
-                f"{zip_code}"
-            )
-        else:
-            location = geolocator.geocode(f"{city}")
-
-        latitude = 'NA' if not location \
-            else str(location.latitude)
-        longitude = 'NA' if not location \
-            else str(location.longitude)
-
         fields = {
             'zip_code': zip_code,
-            'address': clean_html(street),
-            'neighborhood': clean_html(neighborhood),
-            'complement': clean_html(complement),
-            'city': clean_html(city),
-            'region': clean_html(region),
-            'latitude': latitude,
-            'longitude': longitude
+            'address': clean_html(address.get('street', 'NA')),
+            'neighborhood': clean_html(address.get('district', 'NA')),
+            'complement': clean_html(address.get('complement', 'NA')),
+            'city': clean_html(address.get('city', 'NA')),
+            'region': clean_html(address.get('uf', 'NA')),
+            'latitude': str(address.get('latitude', 'NA')),
+            'longitude': str(address.get('longitude', 'NA'))
         }
 
         try:
-            # Validate Postal Code Model
-            if postal_code_model := validate_and_parse_model(
-                    fields,
-                    PostalCodeModel
-            ):
+            if postal_code_model := validate_and_parse_model(fields, PostalCodeModel):
                 ZipCodeModel(**fields)
-                data = PostalCodeHeader(
-                    data=fields
-                )
-                return data
+                return PostalCodeHeader(data=fields)
+                
             log.info(postal_code_model)
+            return None
+            
         except ValueError as e:
             log.info(e.args)
-            return HTTPException(
+            raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=str(e.args),
-                headers=None
+                detail=str(e.args)
             )
