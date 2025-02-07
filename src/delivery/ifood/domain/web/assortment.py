@@ -2,9 +2,10 @@
 import asyncio
 import json
 import re
-import urllib.parse
 from datetime import datetime
 from math import ceil
+from typing import Dict, List, Optional, Any
+import random
 
 from fastapi import HTTPException, status
 from loguru import logger as log
@@ -20,28 +21,27 @@ class Assortment:
     """ Class Assortment """
     host = 'marketplace.ifood.com.br'
     base_url = 'https://www.ifood.com.br'
+    base_image_url = 'https://static-images.ifood.com.br'
 
-    headers = {
-        'User-Agent': generate_user_agent(),
-        'Accept': "application/json, text/plain, */*",
-        'Accept-Language': "pt-BR,pt;q=1",
-        'Accept-Encoding': "gzip, deflate, br",
-        'Cache-Control': "no-cache, no-store",
-        # 'access_key': "69f181d5-0046-4221-b7b2-deef62bd60d5",
-        # 'secret_key': "9ef4fb4f-7a1d-4e0d-a9b1-9b82873297d8",
-        # 'platform': "Desktop",
-        # 'app_version': "9.94.6",
-        # 'browser': "Ubuntu",
-        'Origin': base_url,
-        'Connection': "keep-alive",
-        'Referer': base_url,
-        'Sec-Fetch-Dest': "empty",
-        'Sec-Fetch-Mode': "cors",
-        'Sec-Fetch-Site': "same-site",
-        'Pragma': "no-cache",
-        'TE': "trailers",
-        'cache-control': "no-cache"
-    }
+    @classmethod
+    def _get_default_headers(cls) -> Dict[str, str]:
+        """Headers padrão para requisições"""
+        return {
+            'User-Agent': generate_user_agent(),
+            'Accept': "application/json, text/plain, */*",
+            'Accept-Language': "pt-BR,pt;q=1",
+            'Accept-Encoding': "gzip, deflate, br",
+            'Cache-Control': "no-cache, no-store",
+            'Origin': cls.base_url,
+            'Connection': "keep-alive",
+            'Referer': cls.base_url,
+            'Sec-Fetch-Dest': "empty",
+            'Sec-Fetch-Mode': "cors",
+            'Sec-Fetch-Site': "same-site",
+            'Pragma': "no-cache",
+            'TE': "trailers",
+            'cache-control': "no-cache"
+        }
 
     @classmethod
     async def request(
@@ -51,201 +51,238 @@ class Assortment:
         department_id: str,
         page: str,
         request_waiting: int
-    ) -> dict:
+    ) -> Dict[str, Any]:
         """
-        Function Request
-        :param client:
-        :param store_id:
-        :param department_id:
-        :param search_term:
-        :param page:
-        :param request_waiting:
-        :return: dict
+        Realiza requisição para obter dados do cardápio
+        :param client: Cliente HTTP
+        :param store_id: ID da loja
+        :param department_id: ID do departamento
+        :param page: Número da página
+        :param request_waiting: Tempo de espera
+        :return: Dados do cardápio
         """
-        url = f"https://{cls.host}/v1/" \
-              f"merchants/{store_id}/catalog-category/{department_id}"
-        log.info(f"{url}: scraping data")
+        url = f"https://{cls.host}/v1/merchants/{store_id}/catalog-category/{department_id}"
+        log.info(f"{url}: scraping data for store {store_id}")
 
-        params = {
-            "items_page": page,
-            "items_size": "50",
-            # "parent_taxonomy_name": urllib.parse.quote(search_term)
-        }
+        try:
+            params = {
+                "items_page": page,
+                "items_size": "50"
+            }
 
-        await asyncio.sleep(request_waiting)
-        response = await client.get(
-            url,
-            headers=cls.headers,
-            params=params
-        )
-        data = json.loads(response.text)
-        log.info(data)
-        return {} if not data else data
+            await asyncio.sleep(request_waiting)
+            response = await client.get(
+                url,
+                headers=cls._get_default_headers(),
+                params=params
+            )
+            response.raise_for_status()
+            data = json.loads(response.text)
+            log.info(data)
+            return {} if not data else data
+            
+        except Exception as e:
+            log.error(f"Erro ao buscar cardápio da loja {store_id}: {str(e)}")
+            return {}
 
     @classmethod
-    async def get_product(cls, **kwargs):
+    async def get_product(cls, **kwargs) -> Dict[str, str]:
         """
-        Function Get Product
-        :param kwargs:
-        :return:
+        Obtém detalhes do produto
+        :param kwargs: Parâmetros da requisição
+        :return: Detalhes do produto
         """
-        url = f"https://{cls.host}/ifood-ws-v3/" \
-              f"restaurant/{kwargs['store_id']}/menuitem/{kwargs['category_id']}"
+        url = f"https://{cls.host}/ifood-ws-v3/restaurant/{kwargs['store_id']}/menuitem/{kwargs['category_id']}"
         log.info(f"{url}: scraping data")
-        await asyncio.sleep(2)
-        response = await kwargs['client'].get(
-            url,
-            headers=cls.headers
-        )
-        data = json.loads(response.text)
-        items = {} if not data.get('data') or data.get('code') == '102' \
-            else data.get('data').get('menu')[0].get('itens')
-        availability = taxonomy_name = taxonomy_type = category = sku = ''
 
-        if items:
-            for row in items:
-                sku = 'NA' if not row.get('posCode') \
-                    else row.get('posCode')
-                availability = 'S' if re.search(
+        try:
+            # Reduz o tempo de espera entre requisições e adiciona jitter aleatório
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            
+            # Adiciona timeout e retry na requisição
+            for attempt in range(3):
+                try:
+                    response = await kwargs['client'].get(
+                        url,
+                        headers=cls._get_default_headers(),
+                        timeout=5.0
+                    )
+                    break
+                except Exception as e:
+                    if attempt == 2:  # última tentativa
+                        raise
+                    await asyncio.sleep(1 * (attempt + 1))
+                    continue
+            
+            try:
+                data = json.loads(response.text)
+            except json.JSONDecodeError:
+                log.warning(f"Resposta inválida para produto {kwargs['category_id']}")
+                return cls._get_empty_product()
+
+            # Verifica se tem dados válidos
+            if not data or data.get('code') == '102':
+                return cls._get_empty_product()
+
+            menu = data.get('data', {}).get('menu', [])
+            if not menu:
+                return cls._get_empty_product()
+
+            items = menu[0].get('itens', {})
+            if not items:
+                return cls._get_empty_product()
+
+            # Processa apenas o primeiro item
+            row = items[0] if items else {}
+            if not row:
+                return cls._get_empty_product()
+
+            return {
+                'sku': row.get('posCode', 'NA'),
+                'availability': 'S' if re.search(
                     r'AVAILABLE',
-                    row.get('availability'),
+                    row.get('availability', ''),
                     re.IGNORECASE
-                ) else 'N'
-                taxonomy_name = 'NA' if not row.get('taxonomyName') \
-                    else clean_html(row.get('taxonomyName'))
-                taxonomy_type = 'NA' if not row.get('taxonomyType') \
-                    else row.get('taxonomyType')
-                category = 'NA' if not row.get('parentTaxonomyName') \
-                    else clean_html(row.get('parentTaxonomyName'))
+                ) else 'N',
+                'taxonomy_name': clean_html(row.get('taxonomyName', 'NA')),
+                'taxonomy_type': row.get('taxonomyType', 'NA'),
+                'category': clean_html(row.get('parentTaxonomyName', 'NA'))
+            }
 
-        prod = {
-            'sku': sku,
-            'availability': availability,
-            'taxonomy_name': taxonomy_name,
-            'taxonomy_type': taxonomy_type,
-            'category': category
+        except Exception as e:
+            log.error(f"Erro ao buscar produto {kwargs.get('category_id')}: {str(e)}")
+            return cls._get_empty_product()
+
+    @staticmethod
+    def _get_empty_product() -> Dict[str, str]:
+        """Retorna produto vazio com valores padrão"""
+        return {
+            'sku': 'NA',
+            'availability': 'N',
+            'taxonomy_name': 'NA',
+            'taxonomy_type': 'NA',
+            'category': 'NA'
         }
-        return prod
+
+    @staticmethod
+    def _calculate_discount(price_to: float, unit_original_price: float) -> tuple[float, int]:
+        """Calcula desconto e preço original"""
+        if unit_original_price > 0:
+            discount = ceil(abs(((price_to / unit_original_price) * 100) - 100))
+            return unit_original_price, discount
+        return 0, 0
 
     @classmethod
-    async def get_data(cls, **kwargs):
-        """
-        Function Get Data
-        :param kwargs:
-        :return:
-        """
-        now = datetime.now()
-        assortment_list = []
-        # Assortment Info
-        category_menu = {} if not kwargs['data'].get('categoryMenu') \
-            else kwargs['data'].get('categoryMenu')
+    def _build_product_url(cls, **kwargs) -> str:
+        """Constrói URL do produto"""
+        return (f"{cls.base_url}/delivery/{kwargs['region']}/{kwargs['store_slug']}"
+                f"/{kwargs['store_id']}?corredor={kwargs['department_id']}"
+                f"&item={kwargs['category_id']}")
 
-        department = 'NA' if not category_menu.get('name') \
-            else clean_html(category_menu.get('name'))
+    @classmethod
+    def _build_image_url(cls, slug: str) -> str:
+        """Constrói URL da imagem"""
+        if not slug:
+            return ''
+        return f"{cls.base_image_url}/image/upload/t_high/pratos/{slug}"
 
-        items = [] if not category_menu.get('itens') \
-            else category_menu.get('itens')
-        if items:
+    @classmethod
+    async def get_data(cls, **kwargs) -> Optional[AssortmentHeader]:
+        """
+        Processa dados do cardápio
+        :param kwargs: Parâmetros de processamento
+        :return: Dados processados do cardápio
+        """
+        try:
+            now = datetime.now()
+            assortment_list = []
+            
+            category_menu = kwargs['data'].get('categoryMenu', {})
+            if not category_menu:
+                log.warning("Menu de categorias vazio")
+                return AssortmentHeader(records_per_page=50, items=0, pages=0, data=[])
+
+            department = clean_html(category_menu.get('name', 'NA'))
+            items = category_menu.get('itens', [])
+
+            # Processa produtos em paralelo
+            tasks = []
             for product in items:
-                name = 'NA' if not product.get('description') \
-                    else clean_html(product.get('description'))
-                ean = 0 if not product.get('ean') \
-                    else clean_ean(product.get('ean'))
-                category_id = 'NA' if not product.get('id') \
-                    else product.get('id')
-                details = 'NA' if not product.get('details') \
-                    else clean_html(product.get('details'))
+                category_id = product.get('id', 'NA')
+                if category_id == 'NA':
+                    continue
 
-                slug = '' if not product.get('logoUrl') \
-                    else product.get('logoUrl')
-                base_url_image = 'https://static-images.ifood.com.br'
-                slug_image = f'image/upload/t_high/pratos/{slug}'
-                image = f'{base_url_image}/{slug_image}'
-
-                url = f"{cls.base_url}/delivery/" \
-                      f"{kwargs['region']}/{kwargs['store_slug']}" \
-                      f"/{kwargs['store_id']}?" \
-                      f"corredor={kwargs['department_id']}" \
-                      f"&item={category_id}"
-
-                price_from = 0 if not product.get('unitPrice') \
-                    else float(product.get('unitPrice'))
-                price_to = 0 if not product.get('unitMinPrice') \
-                    else float(product.get('unitMinPrice'))
-
-                if (price_from == price_to) and (price_from > 0 and price_to > 0):
-                    price_from = 0
-
-                unit_original_price = 0 if not product.get('unitOriginalPrice') \
-                    else float(product.get('unitOriginalPrice'))
-
-                discount = 0
-                if unit_original_price > 0:
-                    price_from = unit_original_price
-                    discount = ceil(abs(((price_to / unit_original_price) * 100) - 100))
-
-                # Product Info
-                product_info = await cls.get_product(
+                task = asyncio.create_task(cls.get_product(
                     store_id=kwargs['store_id'],
                     client=kwargs['client'],
                     category_id=category_id
-                )
-                fields = {
-                    'name': name,
-                    'ean': ean,
-                    'sku': product_info.get('sku'),
-                    'department': department,
-                    'category': product_info.get('category'),
-                    'sub_category': product_info.get('taxonomy_name'),
-                    'department_id': kwargs['department_id'],
-                    'category_id': category_id,
-                    'search_term': kwargs['search_term'],
-                    'details': details,
-                    'availability': product_info.get('availability'),
-                    'price_from': price_from,
-                    'price_to': price_to,
-                    'discount': discount,
-                    'segment_type': kwargs['segment_type'],
-                    'store_id': kwargs['store_id'],
-                    'latitude': kwargs['latitude'],
-                    'longitude': kwargs['longitude'],
-                    # 'taxonomy_type': product_info.get('taxonomy_type'),
-                    'image': image,
-                    'url': url,
-                    'created_at': now.strftime("%Y-%m-%d"),
-                    'hour': now.strftime("%H:%M:%S")
-                }
-                log.info(fields)
+                ))
+                tasks.append((product, task))
+
+            # Aguarda todos os produtos serem processados
+            for product, task in tasks:
                 try:
-                    # Validate Product Model
-                    if product_model := validate_and_parse_model(
-                        fields,
-                        ProductModel
-                    ):
-                        # Save data in the Assortment Model
+                    product_info = await task
+                    
+                    # Processa preços e desconto
+                    price_to = float(product.get('unitMinPrice', 0) or 0)
+                    price_from = float(product.get('unitPrice', 0) or 0)
+                    unit_original_price = float(product.get('unitOriginalPrice', 0) or 0)
+
+                    if price_from == price_to and price_from > 0:
+                        price_from = 0
+
+                    price_from, discount = cls._calculate_discount(price_to, unit_original_price)
+
+                    fields = {
+                        'name': clean_html(product.get('description', 'NA')),
+                        'ean': clean_ean(product.get('ean', 0)),
+                        'sku': product_info.get('sku'),
+                        'department': department,
+                        'category': product_info.get('category'),
+                        'sub_category': product_info.get('taxonomy_name'),
+                        'department_id': kwargs['department_id'],
+                        'category_id': product.get('id', 'NA'),
+                        'search_term': kwargs['search_term'],
+                        'details': clean_html(product.get('details', 'NA')),
+                        'availability': product_info.get('availability'),
+                        'price_from': price_from,
+                        'price_to': price_to,
+                        'discount': discount,
+                        'segment_type': kwargs['segment_type'],
+                        'store_id': kwargs['store_id'],
+                        'latitude': kwargs['latitude'],
+                        'longitude': kwargs['longitude'],
+                        'image': cls._build_image_url(product.get('logoUrl')),
+                        'url': cls._build_product_url(**kwargs, category_id=product.get('id')),
+                        'created_at': now.strftime("%Y-%m-%d"),
+                        'hour': now.strftime("%H:%M:%S")
+                    }
+
+                    if product_model := validate_and_parse_model(fields, ProductModel):
                         assortment = AssortmentModel(**fields)
                         assortment_list.append(assortment)
                     else:
-                        log.info(product_model)
-                except ValueError as e:
-                    log.info(e.args)
-                    return HTTPException(
-                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        detail=str(e.args)
-                    )
-        # Pagination Info
-        metadata = {} if not kwargs['data'].get('metadata') \
-            else kwargs['data'].get('metadata')
-        items = 0 if not metadata.get('pagination') \
-            else metadata.get('pagination').get('items')
-        pages = 0 if not metadata.get('pagination') \
-            else metadata.get('pagination').get('pages')
+                        log.warning(f"Falha na validação do produto: {fields.get('sku')}")
 
-        # Save data in the Assortment Header
-        result = AssortmentHeader(
-            records_per_page=50,
-            items=items,
-            pages=pages,
-            data=assortment_list
-        )
-        return result
+                except Exception as e:
+                    log.error(f"Erro ao processar produto: {str(e)}")
+                    continue
+
+            # Processa informações de paginação
+            metadata = kwargs['data'].get('metadata', {})
+            pagination = metadata.get('pagination', {})
+            
+            return AssortmentHeader(
+                records_per_page=50,
+                items=pagination.get('items', 0),
+                pages=pagination.get('pages', 0),
+                data=assortment_list
+            )
+            
+        except Exception as e:
+            log.error(f"Erro ao processar cardápio: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Erro ao processar dados do cardápio"
+            )
